@@ -1,0 +1,77 @@
+#Clean R memory
+rm(list=ls())
+
+#Set working directory
+setwd("C:/Users/...")
+
+#Check the files inside your choosen directory
+list.files()
+
+#Open photo data
+photo_df<-read.csv("photos_links.csv", sep=';')
+str(photo_df)
+
+#Load required packages
+library(httr)
+library(jsonlite)
+library(XML)    
+library(stringr)
+library(RCurl)
+
+#Create a new column for the photo direct link
+photo_df$link<-rep(NA,nrow(photo_df))
+
+
+#Loop through the photos to get the direct photo link
+#It is needed to get the direct photo link because there are restrictions
+#for Google Cloud Vision to analyse images directly from the main Flickr pages
+for (i in 1:nrow(photo_df)){
+  #Make sure this is the column in the dataset with the Flickr url
+  url<-as.character(photo_df$url[i])
+  #Read the url and extract the link
+  get_data<-htmlParse(getURL(url),asText = T)
+  res <- xpathSApply(get_data, "//meta[@property='og:image']",xmlGetAttr,"content")
+  #Save the link back in the dataset
+  if (length(res)==0){
+    next()
+  }else{
+  photo_df$link[i]<-res
+  print(i)
+}
+}
+
+#Load required packages for image machine learning identification
+library(RoogleVision)
+
+#Define login options
+options("googleAuthR.client_id" = "copy and paste your client id here")
+options("googleAuthR.client_secret" = "copy and paste your client secret here")
+options("googleAuthR.scopes.selected" = c("https://www.googleapis.com/auth/cloud-platform"))
+#Authenticate access
+googleAuthR::gar_auth()
+
+#Create a new dataframe to store the data
+#Assuming the number of photos equals the number of lines on the Flickr dataset
+#And assuming 5 tags per photo we have
+ml_df<-data.frame(mid = rep(NA,nrow(photo_df)*5),
+                  description = rep(NA,nrow(photo_df)*5),
+                  score = rep(NA,nrow(photo_df)*5),
+                  topicality = rep(NA,nrow(photo_df)*5),
+                  photo_id = rep(NA,nrow(photo_df)*5),
+                  photo_link = rep(NA,nrow(photo_df)*5))
+
+#Loop through the photos using the machine learning algorithm to get the tags
+for (i in 1:nrow(photo_df)){
+  ml_class <- getGoogleVisionResponse(imagePath = photo_df$link[i])
+  ml_class$photo_id<-photo_df$photoID[i]
+  ml_class$photo_link<-photo_df$link[i]
+  start_line<-5*(i-1)+1
+  end_line<-start_line+(nrow(ml_class))-1
+  if(is.na(end_line[1])==T){
+    next()
+  }else{
+  ml_df[start_line:end_line,]<-ml_class}
+  print(i)
+}
+
+write.table(ml_df,"ml_GoogleCloudVision.txt",sep="\t",dec=".",row.names = F)

@@ -1,0 +1,176 @@
+#Clean R memory (makes sure there are no objects in memory from previous sessions)
+rm(list=ls())
+
+#Opens required libraries for analysis
+library(gsubfn)
+
+####Set up function to sample photos
+#Creates the flickr.get R function, which connects to Flickr API for photo search
+flickr.get <- function(api.key,bbox,min.date=NA,max.date=NA){
+  apicode<-paste("https://api.flickr.com/services/rest/?method=flickr.photos.search&api_key=",
+                  as.character(api.key),"&bbox=",bbox,sep="",collapse="")
+  if(is.na(min.date)==F){
+    apicode<-paste(apicode,"&min_taken_date=",min.date,sep="")
+  }
+  if(is.na(max.date)==F){
+    apicode<-paste(apicode,"&max_taken_date=",max.date,sep="")
+  }
+  tmp.file <- paste(getwd(),"tmp.file",sep="")
+  download.file(apicode, tmp.file)
+  t1<- readChar(tmp.file,nchars=1e6)
+  t2<-strapplyc(t1, "total=\"(.*)\"", simplify = TRUE)
+  t3<-strsplit(t2, ">\r")[[1]][1]
+  t4<-as.numeric(gsub("([^0-9])","",t3))
+  if(t4==0){return(NA)}
+  else{
+  u1 <- strsplit(t1, "photo id")
+  u1<- u1[[1]]
+  u1 <- u1[2:length(u1)]
+  photos2 <- as.data.frame(matrix(0,nrow=length(u1), ncol = 6))
+  colnames(photos2)<- c("PhotoID", "Uploaded", "Taken", "long", "lat", "url")
+  for(j in 1:length(u1)){
+    u2<-substr(u1[j],3,regexpr(" owner", (u1[j]))[1]-2)
+    photos2[j,1]<-u2
+    u2<-paste("https://api.flickr.com/services/rest/?method=flickr.photos.getInfo&api_key=",
+              api.key,"&photo_id=", u2, sep="", collapse="")
+    download.file(u2,tmp.file)
+    u2<- readChar(tmp.file,nchars=1e6)
+    photos2[j,2]<-substr(u2, regexpr("dateuploaded=", u2)[1]+14,
+                         regexpr("dateuploaded=", u2)[1]+23)
+    photos2[j,3]<-substr(u2, regexpr("taken=", u2)[1]+7,
+                         regexpr("taken=", u2)[1]+25)
+    photos2[j,4]<-substr(u2, regexpr("longitude", u2)[1]+11, regexpr(" accuracy", u2)[1]-
+                           2)
+    photos2[j,5]<-substr(u2, regexpr("latitude", u2)[1]+10, regexpr("longitude", u2)[1]-3)
+    photos2[j,6] <- substr(u2, regexpr("https://www.flickr.com", u2)[1], nchar(u2))
+    photos2[j,6]<-substr(photos2[j,6],0,regexpr("url",photos2[j,6])[1]-3)
+  }
+  photos2$Uploaded <- as.POSIXct(as.numeric(photos2$Uploaded), origin="1970-01-01")
+  photos2
+  }
+  }
+
+
+####Flickr photo search
+#Firstly, we need to define the time period for photo search
+#Two parameters are usually required minimum (min_date) and maximum (max_date) search date
+#min_date and max_date need to be in mysql date time format
+#eg. min_date<-"2015-04-01 00:00:00"
+#To make sure the data is complied to this format, we can use the expression "%Y-%m-%d %H:%M:%S"
+#For details, you can check the help file of the function strptime() by running ?strptime
+#Minimum search date
+min_date<-format(strptime("2013-01-01 00:00:00",format="%Y-%m-%d %H:%M:%S",tz="GMT"),'%Y-%m-%d %H:%M:%S')
+#Maximum search date
+max_date<-format(strptime("2017-12-31 23:59:59",format="%Y-%m-%d %H:%M:%S",tz="GMT"),'%Y-%m-%d %H:%M:%S')
+
+#Secondly, we need to feed an API key to the server, who identifies the user
+#api.key needs to be quoted ""
+#For this, you need to create a Flickr account - further instruction can be found on their website
+api.key<-"copy and paste your Flickr api key here"
+
+#Let's now define the working directory (where R can load and save files from)
+#It needs to be fed into the setwd() function
+#You can usually copy and paste the folder directory path from windows explorer
+#Just be aware you need to change the '\' to '/' for the the copied path to work
+#Make this the path were the GIS grid is located as we will use it for sampling purposes
+setwd("copy and paste your working directory here")
+
+
+#Now we need to open the required libraries to read spatial data in R
+library(maptools)
+library(sp)
+
+#Ok,let's create a spatial object from the shapefile that contains the GIS grid
+grid<-readShapePoly("nameofyourshapefile.shp", proj4string=CRS("+proj=longlat +datum=WGS84"))
+
+#Now, the final step to run the search is to define its spatial focus
+#Our function uses a bounding box approach (point sampling approach is also available but will not be used here)
+#For sampling purposes we need to generate an R object called with the information required to define the bounding box
+#The format required by the Flickr API for the bbox is a set of coordinates representing the
+#lower left corner (long,lat) e upper right corner (long,lat) of the bbox
+#eg. bbox<-"-37.57,-8.62,-37.17,-8.38"
+#Hence the square grid representing your study area - we will use each square as a bounding box
+#and run a loop to search each grid square
+
+#Running a for loop in R
+for(j in 1:nrow(grid@data)){
+  #Generates an R object with a single grid square j out of the total grid
+  a<-grid@polygons[[j]]
+  #Extracts the polygon information from this grid square object
+  a<-a@Polygons[[1]]
+  #Extracts the coordinates for the lower left and upper right corners of the grid square
+  coords<-a@coords[c(4,2),]
+  #Creates a bounding box object in the format required by the Flickr API
+  bbox<-paste(coords[1,1],",",coords[1,2],",",coords[2,1],",",coords[2,2],sep="")
+  #This runs the search with the flickr.get function we created at the top and feeding it the required info
+  searched.photos <- flickr.get(api.key,bbox,min.date=min_date,max.date=max_date)
+  #This lines saves the search for each grid on an individual text file
+  #This is done to make sure we have a back up of the originally extracted data in case we need to revisit it
+  #Note that you need to define a path for it to save the photos, I would recommend an empty folder
+  write.table(searched.photos,paste("C:/Users/...",j,".txt",sep=""),sep="\t",dec=".",row.names=F)
+  #This line just provides control information over the script - it reads which x square was sampled out of y grid squares
+  print(paste("Row ",j," of ",nrow(grid@data),sep=""))
+  #This line puts the R system to sleep for 15 seconds - This is to ensure we are not overcharging the API server
+  Sys.sleep(15)
+}
+  
+## CLEANING THE DATA
+
+#Clean R memory (makes sure there are no objects in memory from previous sessions)
+rm(list=ls())
+
+#Open the necessary R libraries for the analysis
+library(maptools)
+library(sp)
+
+#Select the working directory which contains a shapefile of your  study area 
+setwd("copy and paste your working directory here")
+#Open the shapefile
+grid<-readShapePoly("shapefilename.shp")
+plot(grid)
+
+#Select the working directory which contains the Flickr photos files
+setwd("C:/Users/...")
+
+#Creates a list with all archives in the working directory
+arq_fotos<-list.files()
+list.files()
+
+#Creates a data frame to join all photos info
+es_photos<-data.frame()
+
+#Opens all archives from the working directory
+for(i in 1:length(arq_fotos)){
+  a<-read.table(arq_fotos[i],header=T,sep="\t")
+  if(is.na(a[1,1])==T){
+    print(i)
+    next()
+  }else{
+    es_photos<-rbind(es_photos,a)}
+  print(i)
+}
+
+#Removes all duplicated lines
+es_photos2<-unique(es_photos)
+#Convert lat and long columns into numeric format
+es_photos2$lat<-as.numeric(es_photos2$lat)
+es_photos2$long<-as.numeric(es_photos2$long)
+#Removes all lines in which the information is incomplete
+es_photos2<-na.omit(es_photos2)
+
+#Convert photos coordinates into geographic points
+pts_photos<-SpatialPointsDataFrame(es_photos2[,4:5],es_photos2,match.ID=T)
+test<-over(pts_photos,grid)
+
+es_photos2<-es_photos2[!is.na(test[,1]),]
+pts_photos2<-SpatialPointsDataFrame(es_photos2[,4:5],es_photos2,match.ID=T)
+
+#Saves the final data frame
+write.table(es_photos,"final_data_frame.txt",sep="\t",dec=".",row.names=F)
+
+
+#Saves the final data frame as .shp
+#You should change to a new working directory now in order to separate the final shapefile from the other files
+setwd("C:/Users/...")
+writePointsShape(pts_photos2,"points.shp")
+
